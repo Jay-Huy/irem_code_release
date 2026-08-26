@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch checkpoints and models
+*.pth
+*.pt
+cachedir/
+result/
+models/
+
+# Dataset cache files (large .npz files)
+cache/
+*.npz
+
+# Weights & Biases
+wandb/
+
+# Tensorboard
+runs/
+events.out.tfevents.*
+
+# Environment
+.env
+myenv/
+venv/
+.venv/
+.ipynb_checkpoints/
+.DS_Store
