@@ -18,7 +18,7 @@ Dưới đây là bảng so sánh chéo từng siêu tham số (Hyperparameters)
 | **Batch Size** | **128** | `512` | `--batch_size 128` (hoặc `512`) | Paper báo cáo dùng `batch_size = 128` trên 1 GPU Titan X. Codebase để mặc định `512`. Nếu dùng GPU có VRAM lớn $\ge 8\text{GB}$, cả 128 và 512 đều chạy rất tốt. |
 | **Optimizer** | **Adam** | Adam | Adam | Khớp 100%. |
 | **Learning Rate (LR)** | **1e-4** | `1e-4` | `--lr 1e-4` | Khớp 100%. |
-| **Số bước huấn luyện (Iterations)** | **10,000** | 10,000 (Hard limit) | 10,000 steps | Khớp 100% (trong `train.py` có câu lệnh `if it > 10000: assert False`). |
+| **Số bước huấn luyện (Iterations)** | **10,000** | 10,000 (Mặc định) | `--num_iterations 10000` (hoặc tùy chọn 1000, 5000) | Có thể tùy chỉnh số bước huấn luyện bất kỳ qua cờ `--num_iterations`. |
 | **Training Iterative Steps ($K$)** | **5 steps** | `10` steps | `--num_steps 5` (hoặc `10`) | Paper báo cáo train với 5 bước lặp (`num_steps = 5`), code để mặc định `10`. Với Hopfield Solver, train 5 hay 10 bước đều hội tụ rất nhanh. |
 | **Inference Iterative Steps (Test)** | **80 steps** | 80 steps | 80 steps | Trong hàm `test()`, hệ thống tự động chạy suy luận 80 bước để đo lường khả năng thích ứng (Adaptive Compute). |
 | **Step Size $\lambda$ (`step_lr`)** | Không cố định | `100.0` (EBM) | **`0.5`** (Hopfield)<br>`100.0` (EBM) | EBM gốc dùng `100.0` vì gradient MLP rất bé. Hopfield là Residual Convex combination nên $\lambda \in (0, 1]$ (Khuyến nghị: `0.5`, có thể thử nghiệm `0.25`, `0.75`, `1.0`). |
@@ -100,6 +100,7 @@ Dựa trên **Table 10 trong Appendix D của Paper**:
 * `--cuda`: Chạy trên GPU CUDA.
 * `--batch_size`: Kích thước batch (Mặc định paper: `128`, mặc định code: `512`).
 * `--lr`: Learning rate cho Adam optimizer (Mặc định: `1e-4`).
+* `--num_iterations`: **[MỚI]** Tổng số bước huấn luyện Iterations/Batches cần chạy (Mặc định: `10000`, có thể chỉnh ví dụ `1000`, `5000` tùy ý).
 * `--num_steps`: Số bước suy luận lặp lúc Train (Mặc định paper: `5`, mặc định code: `10`).
 * `--step_lr`: Hệ số bước nhảy $\lambda$ cập nhật Residual cho Hopfield (Mặc định: `0.5`).
 * `--beta`: Tham số nhiệt độ nghịch đảo (Mặc định: `None` $\rightarrow \frac{1}{\sqrt{d_k}}$; nếu truyền số thực như `1.0` $\rightarrow$ trở thành `nn.Parameter` tự học).
@@ -157,3 +158,55 @@ python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5
 ```bash
 python train.py --dataset inverse --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --ood --run_name hopfield_inverse_ood
 ```
+
+---
+
+# VI. MẪU CELL CHẠY TRÊN KAGGLE / GOOGLE COLAB (TỰ ĐỘNG HÓA THAM SỐ)
+
+Trong Notebook trên Kaggle hoặc Colab, bạn chỉ cần gán biến một lần ở đầu, toàn bộ các cell huấn luyện và đánh giá sẽ tự động đồng bộ theo:
+
+### 1. Cell Khai báo biến & Huấn luyện (Training):
+```python
+# ==========================================
+# 1. KHAI BÁO CÁC BIẾN THỰC NGHIỆM
+# ==========================================
+DATASET = "inverse"          # "addition", "lowrank", "inverse"
+NUM_ITERS = 10000            # 500, 1000, 10000
+STEP_LR = 0.5                # 0.25, 0.5, 0.75, 1.0
+NUM_STEPS = 5                # Số bước suy luận khi Train (5 hoặc 10)
+BATCH_SIZE = 128
+SAVE_INTERVAL = 1000         # Tần suất Test & Save (200 hoặc 1000)
+
+# Tự động sinh tên đồng bộ
+EXP_NAME = f"hopfield_{DATASET}_iter{NUM_ITERS}"
+RUN_NAME = f"hopfield_{DATASET}_b{BATCH_SIZE}_lr{STEP_LR}"
+
+# Chạy huấn luyện
+!python train.py --dataset {DATASET} --train --cuda \
+    --batch_size {BATCH_SIZE} --num_steps {NUM_STEPS} --step_lr {STEP_LR} \
+    --hopfield --save_interval {SAVE_INTERVAL} \
+    --num_iterations {NUM_ITERS} \
+    --exp {EXP_NAME} --run_name {RUN_NAME}
+```
+
+### 2. Cell Đánh giá cột "Same Diff." (In-Distribution):
+```python
+# Đánh giá 80 bước suy luận trên tập cùng độ khó
+!python train.py --dataset {DATASET} --cuda \
+    --resume_iter {NUM_ITERS} \
+    --hopfield --exp {EXP_NAME} \
+    --run_name {EXP_NAME}_eval_same
+```
+
+### 3. Cell Đánh giá cột "Harder Diff." (Out-of-Distribution / --ood):
+```python
+# Đánh giá 80 bước suy luận trên tập ngoại suy khó hơn
+!python train.py --dataset {DATASET} --cuda \
+    --resume_iter {NUM_ITERS} \
+    --hopfield --exp {EXP_NAME} \
+    --ood \
+    --run_name {EXP_NAME}_eval_harder
+```
+
+> [!TIP]
+> **Tự động đặt tên thông minh (Smart Auto-Naming)**: Nếu bạn không truyền `--exp` hoặc `--run_name`, `train.py` sẽ **tự động sinh tên chuẩn** dạng `hopfield_<dataset>_iter<num_iterations>` để bạn không bao giờ phải gõ thủ công!

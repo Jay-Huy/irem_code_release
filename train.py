@@ -151,6 +151,8 @@ parser.add_argument('--batch_size', default=512, type=int,
                     help='size of batch of input to use')
 parser.add_argument('--num_epoch', default=10000, type=int,
                     help='number of epochs of training to run')
+parser.add_argument('--num_iterations', default=10000, type=int,
+                    help='total number of training iterations (batches) to run (defaults to 10000)')
 parser.add_argument('--lr', default=1e-4, type=float,
                     help='learning rate for training')
 parser.add_argument('--log_interval', default=10, type=int,
@@ -167,6 +169,8 @@ parser.add_argument('--rank', default=20, type=int,
                     help='rank of matrix to use')
 parser.add_argument('--num_steps', default=10, type=int,
                     help='Steps of gradient descent for training')
+parser.add_argument('--test_steps', default=20, type=int,
+                    help='Steps of iterative inference for testing')
 parser.add_argument('--step_lr', default=100.0, type=float,
                     help='step size of latents')
 parser.add_argument('--ood', action='store_true',
@@ -183,6 +187,10 @@ parser.add_argument('--hopfield', action='store_true',
                     help='utilize hopfield energy solver model to output prediction')
 parser.add_argument('--beta', default=None, type=float,
                     help='inverse temperature beta for Hopfield attention (default: None -> 1/sqrt(d_k))')
+parser.add_argument('--num_heads', default=8, type=int,
+                    help='Number of heads for Hopfield Multi-head Attention (default: 8. Set to 1 for Single-head)')
+parser.add_argument('--deep_sup', action='store_true',
+                    help='Enable Deep Supervision (calculate loss across all iterative steps)')
 parser.add_argument('--truncate_hopfield', action='store_true',
                     help='truncate gradient in Hopfield reasoning loop (default: False -> full backprop)')
 parser.add_argument('--mem', action='store_true',
@@ -200,11 +208,8 @@ parser.add_argument('--infinite', action='store_true',
                     help='makes the dataset have an infinite number of elements')
 
 
-best_test_error_10 = 10.0
-best_test_error_20 = 10.0
-best_test_error_40 = 10.0
-best_test_error_80 = 10.0
-best_test_error = 10.0
+best_energy_error = float('inf')
+best_oracle_error = float('inf')
 
 
 def average_gradients(model):
@@ -364,7 +369,11 @@ def init_model(FLAGS, device, dataset):
     elif FLAGS.hopfield:
         step_lr = FLAGS.step_lr if FLAGS.step_lr <= 1.0 else 0.5
         beta = getattr(FLAGS, 'beta', None)
-        model = HopfieldEnergySolver(dataset.inp_dim, dataset.out_dim, step_lr=step_lr, beta=beta)
+        num_heads = getattr(FLAGS, 'num_heads', 8)
+        model = HopfieldEnergySolver(
+            dataset.inp_dim, dataset.out_dim, 
+            num_heads=num_heads, step_lr=step_lr, beta=beta
+        )
     else:
         model = EBM(dataset.inp_dim, dataset.out_dim, FLAGS.mem)
 
@@ -388,23 +397,29 @@ def calc_geometric(l, dim=-1):
     return exclusive_cumprod(1 - l, dim=dim) * l
 
 
-def test(train_dataloader, model, FLAGS, step=0):
-    global best_test_error_10, best_test_error_20, best_test_error_40, best_test_error_80, best_test_error
+def test(test_dataloader, model, FLAGS, step=0):
+    global best_energy_error, best_oracle_error
+    from tqdm import tqdm
+
     if FLAGS.cuda:
         dev = torch.device("cuda")
     else:
         dev = torch.device("cpu")
 
-    replay_buffer = None
-    dist_list = []
-    energy_list = []
-    min_dist_list = []
-
     model.eval()
     counter = 0
 
+    dist_list = []
+    energy_list = []
+    min_energy_dist_list = []
+    min_energy_step_list = []
+    oracle_dist_list = []
+    oracle_step_list = []
+
+    test_steps = getattr(FLAGS, 'test_steps', 20)
+
     with torch.no_grad():
-        for inp, im in train_dataloader:
+        for inp, im in tqdm(test_dataloader, desc=f"Testing (Step {step})"):
             im = im.float().to(dev)
             inp = inp.float().to(dev)
 
@@ -412,87 +427,86 @@ def test(train_dataloader, model, FLAGS, step=0):
             pred = (torch.rand_like(im) - 0.5) * 2
             scratch = torch.zeros_like(inp)
 
-            pred_init = pred
             pred, preds, im_grad, energies, scratch, logits = gen_answer(
-                inp, FLAGS, model, pred, scratch, 80)
-            preds = torch.stack(preds, dim=0)
+                inp, FLAGS, model, pred, scratch, test_steps)
+            
+            preds = torch.stack(preds, dim=0)       # (test_steps + 1, batch, out_dim)
+            energies = torch.stack(energies, dim=0) # (test_steps, batch, 1)
 
             if FLAGS.ponder:
                 halting_probs = calc_geometric(logits.sigmoid(), dim=1)[..., 0]
                 cum_halting_probs = torch.cumsum(halting_probs, dim=-1)
-                rand_val = torch.rand(
-                    halting_probs.size(0)).to(
-                    cum_halting_probs.device)
-                sort_id = torch.searchsorted(
-                    cum_halting_probs, rand_val[:, None])
+                rand_val = torch.rand(halting_probs.size(0)).to(cum_halting_probs.device)
+                sort_id = torch.searchsorted(cum_halting_probs, rand_val[:, None])
                 sort_id = torch.clamp(sort_id, 0, sort_id.size(1) - 1)
                 sort_id = sort_id[:, :, None].expand(-1, -1, pred.size(-1))
 
-            energies = torch.stack(energies, dim=0)
-
             dist = (preds - im[None, :])
-            dist = torch.pow(dist, 2)
+            dist = torch.pow(dist, 2).mean(dim=-1)  # (test_steps + 1, batch)
 
-            dist = dist.mean(dim=-1)
-            n = dist.size(1)
+            dist_energies = dist[1:, :]             # (test_steps, batch)
+            
+            # --- Energy Best (EBM selection) ---
+            min_idx = energies[:, :, 0].argmin(dim=0)[None, :]          # (1, batch)
+            dist_min_energy = torch.gather(dist_energies, 0, min_idx)   # (1, batch)
+            min_energy_dist_list.append(dist_min_energy.detach().squeeze(0))
+            min_energy_step_list.append(min_idx.detach().squeeze(0))
 
-            dist_energies = dist[1:, :]
-            min_idx = energies[:, :, 0].argmin(dim=0)[None, :]
-            dist_min_energy = torch.gather(dist_energies, 0, min_idx)
-            min_dist_list.append(dist_min_energy.detach())
+            # --- Oracle Best (Absolute Minimum MSE) ---
+            oracle_min_dist, oracle_min_idx = dist_energies.min(dim=0)  # (batch), (batch)
+            oracle_dist_list.append(oracle_min_dist.detach())
+            oracle_step_list.append(oracle_min_idx.detach())
 
-            dist = dist.mean(dim=-1)
+            energies = energies.mean(dim=-1).mean(dim=-1) # (test_steps,)
+            dist_list.append(dist.mean(dim=-1).detach())  # (test_steps + 1,)
+            energy_list.append(energies.detach())         # (test_steps,)
 
-            energies = energies.mean(dim=-1).mean(dim=-1)
-            dist_list.append(dist.detach())
-            energy_list.append(energies.detach())
-
-            counter = counter + 1
-
-            if counter > 10:
-                dist_list = torch.stack(dist_list, dim=0)
-                dist = dist_list.mean(dim=0)
-                energy_list = torch.stack(energy_list, dim=0)
-                energies = energy_list.mean(dim=0)
-                min_dist = torch.stack(min_dist_list, dim=0).mean()
-
-                print("Testing..................")
-                print("step errors: ", dist[:20])
-                print("energy values: ", energies)
-                print('test at step %d done!' % step)
+            counter += 1
+            if counter > 10:  # Evaluate on a subset of 10 batches to speed up testing
                 break
 
-    if FLAGS.decoder or FLAGS.ponder:
-        best_test_error_10 = min(best_test_error_10, dist[0].item())
-        best_test_error_20 = min(best_test_error_20, dist[0].item())
-        best_test_error_40 = min(best_test_error_40, dist[0].item())
-        best_test_error_80 = min(best_test_error_80, dist[0].item())
-        best_test_error = min(best_test_error, dist[0].item())
-    else:
-        best_test_error_10 = min(best_test_error_10, dist[9].item())
-        best_test_error_20 = min(best_test_error_20, dist[19].item())
-        best_test_error_40 = min(best_test_error_40, dist[39].item())
-        best_test_error_80 = min(best_test_error_80, dist[79].item())
-        best_test_error = min(best_test_error, min_dist.item())
+    # Aggregate over evaluated batches
+    dist_list = torch.stack(dist_list, dim=0).mean(dim=0)          # (test_steps + 1,)
+    energy_list = torch.stack(energy_list, dim=0).mean(dim=0)      # (test_steps,)
+    
+    mean_energy_best_dist = torch.cat(min_energy_dist_list).mean()
+    mean_energy_best_step = torch.cat(min_energy_step_list).float().mean() + 1 # +1 to display 1-indexed step
+    
+    mean_oracle_dist = torch.cat(oracle_dist_list).mean()
+    mean_oracle_step = torch.cat(oracle_step_list).float().mean() + 1          # +1 to display 1-indexed step
 
-    print("best test error (10, 20, 40, 80, min_energy): {} {} {} {} {}".format(
-            best_test_error_10, best_test_error_20, best_test_error_40,
-            best_test_error_80, best_test_error))
+    # Update Global Bests
+    if 'best_energy_error' not in globals():
+        best_energy_error = float('inf')
+        best_oracle_error = float('inf')
+        
+    best_energy_error = min(best_energy_error, mean_energy_best_dist.item())
+    best_oracle_error = min(best_oracle_error, mean_oracle_dist.item())
+
+    print("\nTesting..................")
+    print(f"step errors (up to 20): ", dist_list[:20])
+    print(f"energy values (up to 20): ", energy_list[:20])
+    print(f"Oracle best error: {mean_oracle_dist.item():.5f} (Avg at step {mean_oracle_step.item():.1f})")
+    print(f"Energy best error: {mean_energy_best_dist.item():.5f} (Avg at step {mean_energy_best_step.item():.1f})")
+    print(f'test at step {step} done!')
 
     if getattr(FLAGS, 'use_wandb', False) and HAS_WANDB:
         try:
-            wandb.log({
-                "test/error_step_10": dist[9].item() if len(dist) >= 10 else dist[-1].item(),
-                "test/error_step_20": dist[19].item() if len(dist) >= 20 else dist[-1].item(),
-                "test/error_step_40": dist[39].item() if len(dist) >= 40 else dist[-1].item(),
-                "test/error_step_80": dist[79].item() if len(dist) >= 80 else dist[-1].item(),
-                "test/min_energy_error": min_dist.item(),
-                "test/best_error_10": best_test_error_10,
-                "test/best_error_20": best_test_error_20,
-                "test/best_error_40": best_test_error_40,
-                "test/best_error_80": best_test_error_80,
-                "test/best_error": best_test_error,
-            }, step=step)
+            log_dict = {
+                "test/oracle_best_error": mean_oracle_dist.item(),
+                "test/oracle_best_step": mean_oracle_step.item(),
+                "test/energy_best_error": mean_energy_best_dist.item(),
+                "test/energy_best_step": mean_energy_best_step.item(),
+                "test/global_best_oracle": best_oracle_error,
+                "test/global_best_energy": best_energy_error,
+            }
+            # Dynamically log error at 4 equally spaced intervals
+            intervals = [test_steps // 4, test_steps // 2, 3 * test_steps // 4, test_steps]
+            for m in intervals:
+                if m <= len(dist_list) - 1:
+                    log_dict[f"test/error_step_{m}"] = dist_list[m].item()
+                    
+            wandb.log(log_dict, step=step)
         except Exception:
             pass
 
@@ -556,6 +570,11 @@ def train(train_dataloader, test_dataloader, logger, model,
                     halting_probs.sum(dim=1)[:, None]
                 im_loss = (torch.pow(
                     preds[:, :] - im[:, None, :], 2)).mean(dim=-1).mean(dim=-1)
+            elif FLAGS.hopfield:
+                if getattr(FLAGS, 'deep_sup', False):
+                    im_loss = torch.pow(preds[:, :] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
+                else:
+                    im_loss = torch.pow(preds[:, -1:] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
             else:
                 im_loss = torch.pow(
                     preds[:, -1:] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
@@ -584,9 +603,6 @@ def train(train_dataloader, test_dataloader, logger, model,
 
             optimizer.step()
             optimizer.zero_grad()
-
-            if it > 10000:
-                assert False
 
             if it % FLAGS.log_interval == 0 and rank_idx == 0:
                 loss = loss.item()
@@ -644,6 +660,10 @@ def train(train_dataloader, test_dataloader, logger, model,
                 torch.save(ckpt, model_path)
 
                 test(test_dataloader, model, FLAGS, step=it)
+
+            if it >= getattr(FLAGS, 'num_iterations', 10000):
+                print(f"\n[INFO] Đã hoàn thành huấn luyện: {it}/{FLAGS.num_iterations} iterations.")
+                return
 
             it += 1
 
@@ -739,7 +759,9 @@ def main_single(rank, FLAGS):
             logdir, "model_latest.pth".format(
                 FLAGS.resume_iter))
 
-        checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+        with torch.serialization.safe_globals([argparse.Namespace]):
+            checkpoint = torch.load(model_path, weights_only=True)
+
         FLAGS = checkpoint['FLAGS']
 
         FLAGS.resume_iter = FLAGS_OLD.resume_iter
@@ -760,7 +782,7 @@ def main_single(rank, FLAGS):
         state_dict = model.state_dict()
 
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     else:
         model, optimizer = init_model(FLAGS, device, dataset)
 
