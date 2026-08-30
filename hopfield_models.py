@@ -131,7 +131,7 @@ class HopfieldEnergySolver(nn.Module):
         
         # Cộng thay vì nối (Addition instead of Concatenation)
         tokens = x_feat + pos_feat                        # (batch, inp_dim, 512)
-        return self.norm_x(tokens)
+        return tokens
 
     def embed_latent(self, y):
         """
@@ -146,7 +146,7 @@ class HopfieldEnergySolver(nn.Module):
         
         # Cộng thay vì nối (Addition instead of Concatenation)
         tokens = y_feat + pos_feat                        # (batch, out_dim, 512)
-        return self.norm_z(tokens)
+        return tokens
 
     def forward_step(self, z, x_tokens, step_lr=None):
         """
@@ -162,9 +162,9 @@ class HopfieldEnergySolver(nn.Module):
         """
         lam = step_lr if step_lr is not None else self.step_lr
 
-        Q = self.W_q(self.norm_z(z))  # (batch, out_dim, d_k=512) - Pre-LN cho Query
-        K = self.W_k(x_tokens)        # (batch, inp_dim, d_k=512)
-        V = self.W_v(x_tokens)        # (batch, inp_dim, d_model=512)
+        Q = self.W_q(self.norm_z(z))          # (batch, out_dim, d_k=512) - Pre-LN cho Query
+        K = self.W_k(self.norm_x(x_tokens))   # (batch, inp_dim, d_k=512) - Pre-LN cho Key
+        V = self.W_v(x_tokens)                # (batch, inp_dim, d_model=512) - Không Norm cho Value
 
         batch = Q.size(0)
         d_k_head = self.d_k // self.num_heads
@@ -204,8 +204,8 @@ class HopfieldEnergySolver(nn.Module):
         Tổng năng lượng của các head độc lập.
         Trả về: Tensor shape (batch, 1)
         """
-        Q = self.W_q(self.norm_z(z))       # (batch, out_dim, d_k=512)
-        K = self.W_k(x_tokens)             # (batch, inp_dim, d_k=512)
+        Q = self.W_q(self.norm_z(z))          # (batch, out_dim, d_k=512)
+        K = self.W_k(self.norm_x(x_tokens))   # (batch, inp_dim, d_k=512)
 
         batch = Q.size(0)
         d_k_head = self.d_k // self.num_heads

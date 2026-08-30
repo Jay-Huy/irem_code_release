@@ -1,5 +1,4 @@
 # HƯỚNG DẪN THỰC THI & KHẢO SÁT THAM SỐ (INSTRUCTION MANUAL)
-
 Tài liệu này cung cấp:
 1. **Đối chiếu chi tiết giữa Báo cáo trong Paper (Table 1, 2, 10) và Codebase**.
 2. **Khảo sát cấu trúc mạng & số lượng tham số (Parameters Comparison)**.
@@ -8,11 +7,8 @@ Tài liệu này cung cấp:
 5. **Các câu lệnh mẫu sẵn sàng chạy**.
 
 ---
-
 # I. ĐỐI CHIẾU THAM SỐ: PAPER VS CODEBASE GỐC VS HOPFIELD
-
 Dưới đây là bảng so sánh chéo từng siêu tham số (Hyperparameters) giữa báo cáo trong Paper và mặc định của repository:
-
 | Tham số / Setting | Báo cáo trong Paper | Mặc định Codebase gốc | Khuyến nghị (Recommended) | Ghi chú & Lý giải |
 | :--- | :--- | :--- | :--- | :--- |
 | **Batch Size** | **128** | `512` | `--batch_size 128` (hoặc `512`) | Paper báo cáo dùng `batch_size = 128` trên 1 GPU Titan X. Codebase để mặc định `512`. Nếu dùng GPU có VRAM lớn $\ge 8\text{GB}$, cả 128 và 512 đều chạy rất tốt. |
@@ -26,37 +22,30 @@ Dưới đây là bảng so sánh chéo từng siêu tham số (Hyperparameters)
 | **Tần suất Log Loss (`--log_interval`)** | — | `10` steps | `--log_interval 10` (hoặc `1`) | Cứ mỗi 10 steps sẽ in ra màn hình terminal và đẩy loss lên W&B / TensorBoard. |
 | **Tần suất Test & Save (`--save_interval`)** | — | `1000` steps | `--save_interval 1000` (hoặc `200`) | Cứ mỗi 1000 steps sẽ chạy đánh giá test 80 bước trên 1000 mẫu và lưu checkpoint `model_latest.pth`. |
 | **Tracking / Logging** | Weights & Biases | TensorBoard | **W&B (Bật mặc định)** | Đã tích hợp W&B tự động, hỗ trợ tùy chỉnh `--run_name`. |
-
 ---
 
 # II. KHẢO SÁT KIẾN TRÚC MÔ HÌNH & SỐ LƯỢNG THAM SỐ (MODEL PARAMETERS)
-
 Dựa trên **Table 10 trong Appendix D của Paper**:
 * Mạng IREM EBM được cấu tạo bởi:
   $$\text{Linear } 512 \rightarrow \text{Swish} \rightarrow \text{Linear } 512 \rightarrow \text{Swish} \rightarrow \text{Linear } 512 \rightarrow \text{Swish} \rightarrow \text{Linear } 1$$
 * Đầu vào của mạng là vector ghép nối $(\mathbf{x}, \mathbf{y})$:
   * Với bài toán `Addition`: $\mathbf{x} \in \mathbb{R}^{800}, \mathbf{y} \in \mathbb{R}^{400} \implies \text{Input dim} = 1200$.
   * Với bài toán `LowRank` & `Inverse`: $\mathbf{x} \in \mathbb{R}^{400}, \mathbf{y} \in \mathbb{R}^{400} \implies \text{Input dim} = 800$.
-
 ### Bảng so sánh số lượng tham số (Param Count):
-
 | Mô hình | Task Addition (inp=800, out=400) | Task LowRank / Inverse (inp=400, out=400) | Kiến trúc chi tiết |
 | :--- | :--- | :--- | :--- |
 | **IREM EBM (Table 10)** | **1,140,737** params (~1.14M) | **935,937** params (~0.94M) | MLP 3 lớp ẩn 512 + Swish $\rightarrow$ Scalar Output (1) |
 | **Feedforward FC** | 1,140,737 params | 935,937 params | MLP 3 lớp ẩn 512 + ReLU $\rightarrow$ Vector Output (400) |
 | **Recurrent FC (LSTM)** | 234,817 params | 234,817 params | Linear(inp, 196) + LSTM(196, 196) + Linear(196, out) |
 | **HopfieldEnergySolver ($d=512$)** | **790,957** params (~0.79M) | **790,957** params (~0.79M) | Embedder (21) + Linear(1, 491) + LayerNorm + Attention ($W_q, W_k, W_v \in \mathbb{R}^{512 \times 512}$) + Decode |
-
 > [!NOTE]
 > Để tự động in chi tiết kiến trúc và đo tham số, bạn có thể chạy:
 > ```bash
 > python check_params.py
 > ```
-
 ---
 
 # III. CƠ CHẾ LOGGING, TẦN SUẤT TEST & GIẢI THÍCH METRICS
-
 ### 1. Tần suất Log Loss khi Huấn luyện (`--log_interval`, mặc định: `10` steps)
 * **Vị trí thiết lập**: `train.py` dòng 155 (`--log_interval 10`) và dòng 591–635 trong hàm `train()`.
 * **Cơ chế hoạt động**: Cứ mỗi `log_interval` bước (ví dụ: step 0, 10, 20, 30...):
@@ -68,7 +57,6 @@ Dựa trên **Table 10 trong Appendix D của Paper**:
      * `train/no_replay_loss` & `train/replay_loss`: Loss phân tách giữa mẫu mới và mẫu lấy từ Replay Buffer.
      * `train/energy_no_replay` & `train/energy_replay`: Năng lượng Hopfield tại bước cuối.
      * `train/iteration`: Số bước lặp huấn luyện hiện tại.
-
 ### 2. Tần suất Đánh giá Test & Lưu Checkpoint (`--save_interval`, mặc định: `1000` steps)
 * **Vị trí thiết lập**: `train.py` dòng 157 (`--save_interval 1000`) và dòng 637–647 trong hàm `train()`.
 * **Cơ chế hoạt động**: Cứ mỗi `save_interval` bước (step 0, 1000, 2000, 3000...):
@@ -81,11 +69,9 @@ Dựa trên **Table 10 trong Appendix D của Paper**:
      * `test/error_step_80`: Sai số MSE sau 80 bước suy luận.
      * `test/min_energy_error`: Sai số tại điểm có năng lượng Hopfield nhỏ nhất $\arg\min_k E(\mathbf{z}_k)$.
      * `test/best_error`: **Sai số nhỏ nhất toàn thời gian (Metric chính đối chiếu với Table 1 & Table 2 trong Paper)**.
-
 ---
 
 # IV. TỪ ĐIỂN THAM SỐ DÒNG LỆNH (CLI ARGUMENTS DICTIONARY)
-
 ### 1. Chọn Mô hình (Model Architecture)
 * `--hopfield`: **[KHUYÊN DÙNG]** Kích hoạt mô hình `HopfieldEnergySolver` (Analytical Attention Gradient + LayerNorm + $d_{\text{model}}=512$).
 * (Không truyền gì): Mặc định chạy mô hình `EBM` của IREM (MLP 3 lớp Swish 512 + PyTorch Autograd).
@@ -93,7 +79,6 @@ Dựa trên **Table 10 trong Appendix D của Paper**:
 * `--iterative_decoder`: Baseline Feedforward lặp tự hồi quy.
 * `--ponder`: Baseline PonderNet.
 * `--decoder`: Baseline MLP 1 bước duy nhất.
-
 ### 2. Thiết lập Huấn luyện & Dữ liệu
 * `--dataset`: Tên tập dữ liệu (`addition`, `lowrank`, `inverse`).
 * `--train`: Bật chế độ huấn luyện (nếu không truyền sẽ chỉ chạy test).
@@ -117,96 +102,91 @@ Dựa trên **Table 10 trong Appendix D của Paper**:
 * `--no_wandb`: Tắt ghi log W&B (nếu chỉ muốn chạy offline).
 * `--wandb_project`: Tên project trên W&B (Mặc định: `irem-experiments`).
 * `--wandb_entity`: Tên team / username trên W&B (Tùy chọn).
-
 ---
 
-# V. CÁC CÂU LỆNH MẪU SẴN SÀNG CHẠY (READY-TO-RUN COMMANDS)
-
-### 1. Chạy Hopfield Energy Solver với Custom Run Name
-```bash
-# Continuous Addition (Batch size 128, 5 steps train, step_lr 0.5)
-python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --run_name hopfield_addition_b128
-
-# Matrix Completion (LowRank)
-python train.py --dataset lowrank --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --run_name hopfield_lowrank_b128
-
-# Matrix Inverse
-python train.py --dataset inverse --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --run_name hopfield_inverse_b128
-```
-
-### 2. Chạy với Tần suất Log & Test dày hơn để Debug nhanh
-```bash
-# Log loss mỗi 1 step, test 80 steps mỗi 200 iterations:
-python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --log_interval 1 --save_interval 200 --run_name hopfield_debug_fast
-```
-
-### 3. Thực nghiệm Ablation: So sánh Replay Buffer
-```bash
-# Có Replay Buffer (Mặc định):
-python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --run_name hopfield_with_replay
-
-# KHÔNG có Replay Buffer (--no_replay_buffer):
-python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --no_replay_buffer --run_name hopfield_no_replay
-```
-
-### 4. Chạy EBM Baseline gốc để so sánh đối chứng
-```bash
-python train.py --dataset addition --train --cuda --batch_size 128 --num_steps 5 --step_lr 100.0 --run_name baseline_ebm_addition
-```
-
-### 5. Đánh giá Out-of-Distribution (`--ood`)
-```bash
-python train.py --dataset inverse --train --cuda --batch_size 128 --num_steps 5 --step_lr 0.5 --hopfield --ood --run_name hopfield_inverse_ood
-```
-
----
-
-# VI. MẪU CELL CHẠY TRÊN KAGGLE / GOOGLE COLAB (TỰ ĐỘNG HÓA THAM SỐ)
-
+# V. MẪU CELL CHẠY TRÊN KAGGLE / GOOGLE COLAB (TỰ ĐỘNG HÓA THAM SỐ)
 Trong Notebook trên Kaggle hoặc Colab, bạn chỉ cần gán biến một lần ở đầu, toàn bộ các cell huấn luyện và đánh giá sẽ tự động đồng bộ theo:
 
-### 1. Cell Khai báo biến & Huấn luyện (Training):
+### 1. Script 1: Mô hình Baseline (1 head, không Deep Supervision)
 ```python
 # ==========================================
 # 1. KHAI BÁO CÁC BIẾN THỰC NGHIỆM
 # ==========================================
-DATASET = "inverse"          # "addition", "lowrank", "inverse"
-NUM_ITERS = 10000            # 500, 1000, 10000
+DATASET = "lowrank"          # "addition", "lowrank", "inverse"
+NUM_ITERS = 1000   # 500, 1000, 10000
+NUM_STEPS = 2
+SAVE_INTERVAL = 200
+
 STEP_LR = 0.5                # 0.25, 0.5, 0.75, 1.0
-NUM_STEPS = 5                # Số bước suy luận khi Train (5 hoặc 10)
 BATCH_SIZE = 128
-SAVE_INTERVAL = 1000         # Tần suất Test & Save (200 hoặc 1000)
 
-# Tự động sinh tên đồng bộ
-EXP_NAME = f"hopfield_{DATASET}_iter{NUM_ITERS}"
-RUN_NAME = f"hopfield_{DATASET}_b{BATCH_SIZE}_lr{STEP_LR}"
+# 2. Tự động sinh tên Experiment và W&B Run Name đồng bộ
+EXP_NAME = f"hopfield_{DATASET}_{NUM_ITERS}iter_{NUM_STEPS}step_{STEP_LR}lr_baseline"
+RUN_NAME = f"hopfield_{DATASET}_{NUM_ITERS}iter_{NUM_STEPS}step_{STEP_LR}lr_baseline"
 
-# Chạy huấn luyện
+# Chạy huấn luyện (Baseline)
 !python train.py --dataset {DATASET} --train --cuda \
     --batch_size {BATCH_SIZE} --num_steps {NUM_STEPS} --step_lr {STEP_LR} \
-    --hopfield --save_interval {SAVE_INTERVAL} \
+    --hopfield --num_heads 1 --save_interval {SAVE_INTERVAL} \
     --num_iterations {NUM_ITERS} \
     --exp {EXP_NAME} --run_name {RUN_NAME}
 ```
 
-### 2. Cell Đánh giá cột "Same Diff." (In-Distribution):
 ```python
-# Đánh giá 80 bước suy luận trên tập cùng độ khó
+# Đánh giá cột "Same Diff." (In-Distribution)
 !python train.py --dataset {DATASET} --cuda \
     --resume_iter {NUM_ITERS} \
-    --hopfield --exp {EXP_NAME} \
+    --hopfield --num_heads 1 --exp {EXP_NAME} \
     --run_name {EXP_NAME}_eval_same
 ```
 
-### 3. Cell Đánh giá cột "Harder Diff." (Out-of-Distribution / --ood):
 ```python
-# Đánh giá 80 bước suy luận trên tập ngoại suy khó hơn
+# Đánh giá cột "Harder Diff." (Out-of-Distribution / --ood)
 !python train.py --dataset {DATASET} --cuda \
     --resume_iter {NUM_ITERS} \
-    --hopfield --exp {EXP_NAME} \
+    --hopfield --num_heads 1 --exp {EXP_NAME} \
     --ood \
     --run_name {EXP_NAME}_eval_harder
 ```
 
-> [!TIP]
-> **Tự động đặt tên thông minh (Smart Auto-Naming)**: Nếu bạn không truyền `--exp` hoặc `--run_name`, `train.py` sẽ **tự động sinh tên chuẩn** dạng `hopfield_<dataset>_iter<num_iterations>` để bạn không bao giờ phải gõ thủ công!
+### 2. Script 2: Mô hình Best (8 heads, có Deep Supervision)
+```python
+# ==========================================
+# 1. KHAI BÁO CÁC BIẾN THỰC NGHIỆM
+# ==========================================
+DATASET = "lowrank"          # "addition", "lowrank", "inverse"
+NUM_ITERS = 1000   # 500, 1000, 10000
+NUM_STEPS = 2
+SAVE_INTERVAL = 200
+
+STEP_LR = 0.5                # 0.25, 0.5, 0.75, 1.0
+BATCH_SIZE = 128
+
+# 2. Tự động sinh tên Experiment và W&B Run Name đồng bộ
+EXP_NAME = f"hopfield_{DATASET}_{NUM_ITERS}iter_{NUM_STEPS}step_{STEP_LR}lr_best"
+RUN_NAME = f"hopfield_{DATASET}_{NUM_ITERS}iter_{NUM_STEPS}step_{STEP_LR}lr_best"
+
+# Chạy huấn luyện (Best)
+!python train.py --dataset {DATASET} --train --cuda \
+    --batch_size {BATCH_SIZE} --num_steps {NUM_STEPS} --step_lr {STEP_LR} \
+    --hopfield --num_heads 8 --deep_sup --save_interval {SAVE_INTERVAL} \
+    --num_iterations {NUM_ITERS} \
+    --exp {EXP_NAME} --run_name {RUN_NAME}
+```
+
+```python
+# Đánh giá cột "Same Diff." (In-Distribution)
+!python train.py --dataset {DATASET} --cuda \
+    --resume_iter {NUM_ITERS} \
+    --hopfield --num_heads 8 --exp {EXP_NAME} \
+    --run_name {EXP_NAME}_eval_same
+```
+
+```python
+# Đánh giá cột "Harder Diff." (Out-of-Distribution / --ood)
+!python train.py --dataset {DATASET} --cuda \
+    --resume_iter {NUM_ITERS} \
+    --hopfield --num_heads 8 --exp {EXP_NAME} \
+    --ood \
+    --run_name {EXP_NAME}_eval_harder
+```

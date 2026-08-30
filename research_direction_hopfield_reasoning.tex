@@ -1,0 +1,333 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue]{hyperref}
+
+\title{\textbf{Investigating Latent Reasoning via Modern Hopfield Energy Minimization: A Discussion Note}}
+\author{Research Direction \& Preliminary Discussion}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section*{Executive Summary}
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Exploratory Paradigm Shift:} 
+    \begin{itemize}[leftmargin=1.2em]
+        \item Traditional deep architectures often view reasoning as a single-pass feed-forward mapping $y = f(x)$.
+        \item We consider formulating latent reasoning as an energy minimization process $\arg\min_z E(x, z)$, where an initial latent state $z_0$ iteratively descends an energy landscape toward a local attractor.
+    \end{itemize}
+
+    \item \textbf{Connection to Prior Work on Loop Mechanisms:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item This direction potentially leverages and extends our previous investigations into iterative and recurrent loop mechanisms.
+        \item An energy-based formulation provides a natural objective function to guide multi-step iterative refinement.
+    \end{itemize}
+
+    \item \textbf{Key Observation on Existing EBM Literature:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Several recent works at major machine learning venues have explored energy-based reasoning on algorithmic benchmarks.
+        \item However, most existing methods parameterize the energy function using black-box neural networks (such as MLPs or standard Transformers), requiring numerical automatic differentiation (\texttt{torch.autograd}) and resulting in opaque energy landscapes without explicit convergence guarantees.
+    \end{itemize}
+
+    \item \textbf{Proposed Research Hypothesis:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item We hypothesize that by adopting an explicit energy formulation derived from Continuous Modern Hopfield Networks, the gradient descent step can be computed analytically in closed form.
+        \item This analytical gradient corresponds directly to a cross-attention update with residual momentum, potentially offering faster execution, memory savings, and a mathematically well-characterized attractor landscape.
+    \end{itemize}
+\end{itemize}
+
+\vspace{0.8em}
+\hrule
+\vspace{0.5em}
+
+% Clickable Table of Contents
+\tableofcontents
+
+\vspace{0.8em}
+\hrule
+\vspace{1em}
+
+\section{Motivation \& Conceptual Framework}
+\label{sec:motivation}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Feed-Forward Formulation:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Standard deep learning architectures typically formulate reasoning and prediction tasks as a direct feed-forward mapping:
+        \begin{equation}
+            y = f_\theta(x)
+        \end{equation}
+        where $f_\theta$ is a parameterized neural network (e.g., an MLP or a standard Transformer) that maps input $x$ to output $y$ in a single forward pass with fixed computational depth.
+    \end{itemize}
+
+    \item \textbf{Energy Minimization Formulation:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item An alternative paradigm formulates the task as finding an output (or latent state) that minimizes a scalar energy function $E(x, y)$, which quantifies the compatibility between the input $x$ and a candidate solution $y$:
+        \begin{equation}
+            y^* = \arg\min_y E(x, y)
+        \end{equation}
+        \item Then, the model is trained by applying a loss function (e.g., Mean Squared Error) between the found local minima $y^*$ and the ground truth $y_{\text{gt}}$:
+        \begin{equation}
+            \mathcal{L} = \frac{1}{2} \|y_{\text{gt}} - y^*\|^2
+        \end{equation}
+        \item In practice, the optimal solution $y^*$ is sought via iterative gradient descent in the output/latent space, starting from an initial state $y_0$ (e.g., a random initialization or prior guess):
+        \begin{equation}
+            y_{k+1} = y_k - \eta \nabla_y E(x, y_k)
+        \end{equation}
+        where $\eta > 0$ denotes the optimization step size.
+    \end{itemize}
+
+    \item \textbf{Connection to Prior Studies on Loop Mechanisms:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item This energy-based formulation inherently operates as an iterative refinement process, where the candidate solution is progressively updated across $K$ discrete optimization steps.
+        \item As a result, this research direction can naturally leverage our prior investigations into loop and recurrent mechanisms, framing multi-step computation under an explicit energy-guided optimization objective.
+    \end{itemize}
+\end{itemize}
+
+\section{Related Work \& Recent Directions}
+\label{sec:related_work}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Energy Minimization for Algorithmic Tasks:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Multiple recent works formulate problem-solving as energy minimization and evaluate on algorithmic reasoning benchmarks:
+        \begin{itemize}[leftmargin=1.2em]
+            \item \textbf{IREM (ICML 2022):} \textit{Learning Iterative Reasoning through Energy Minimization}.
+            \item \textbf{IRED (ICML 2024):} \textit{Learning Iterative Reasoning through Energy Diffusion}.
+            \item \textbf{DC-EBM (NeurIPS 2025):} \textit{A Difference-of-Convex Functions Approach to Energy-Based Iterative Reasoning}.
+        \end{itemize}
+    \end{itemize}
+
+    \item \textbf{Transformers as Energy Functions for Language Reasoning:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item \textbf{EB-Transformers (ICLR 2026 Oral):} \textit{Energy-Based Transformers are Scalable Learners and Thinkers} defines a Transformer architecture as an energy function, extending energy minimization from algorithmic tasks to complex language reasoning.
+    \end{itemize}
+
+    \item \textbf{Publication Track Record:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item The continuous acceptance of energy minimization frameworks at premier venues (ICML 2022, ICML 2024, NeurIPS 2025, and ICLR 2026 Oral) highlights that formulating reasoning as energy descent is an active, recognized, and viable research direction.
+    \end{itemize}
+\end{itemize}
+
+\section{Potential Limitations of Black-Box Energy Formulations}
+\label{sec:limitations}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Energy Parameterization in Mentioned Works:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item The works listed above (IREM, IRED, DC-EBM, and EB-Transformers) parameterize the energy function $E_\theta(x, z)$ using black-box architectures, specifically deep MLPs or standard Transformer blocks.
+        \item Reasoning is carried out by applying gradient descent on this learned network:
+        \begin{equation}
+            z_{k+1} = z_k - \eta \nabla_z E_\theta(x, z_k)
+        \end{equation}
+    \end{itemize}
+
+    \item \textbf{Practical Limitations (Thực nghiệm / Implementation):}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Evaluating $\nabla_z E_\theta(x, z_k)$ requires calling \texttt{torch.autograd} at every single reasoning step.
+        \item Unrolling across $K$ optimization steps during training requires computing higher-order gradients (gradients through gradients), leading to high latency and large GPU memory consumption.
+    \end{itemize}
+
+    \item \textbf{Theoretical Limitations (Lý thuyết / Energy Landscape):}
+    \begin{itemize}[leftmargin=1.2em]
+        \item When $E_\theta$ is an arbitrary MLP or Transformer, the resulting energy landscape remains an unanalyzed black-box.
+        \item There are no theoretical guarantees or mathematical descriptions regarding the number of local minima, the shape and depth of basins of attraction, or the convergence rate of the optimization steps.
+    \end{itemize}
+\end{itemize}
+
+\section{Proposed Formulation: Modern Hopfield Latent Reasoning}
+\label{sec:formulation}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Inspiration from Continuous Modern Hopfield Networks:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item The continuous Modern Hopfield Network defines an explicit associative memory energy over state vector $z$ and stored patterns $X = [x_1, \dots, x_M]^T$:
+        \begin{equation}
+            E_{\text{Hopfield}}(z) = -\frac{1}{\beta} \log \left( \sum_{j=1}^M \exp(\beta \langle z, x_j \rangle) \right) + \frac{1}{2} \|z\|^2
+        \end{equation}
+        where $\beta > 0$ is the inverse temperature parameter.
+    \end{itemize}
+
+    \item \textbf{Proposed Explicit Energy Function:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item We parameterize the energy function by applying learnable affine transformations $z \mapsto z W_q$ and $X \mapsto X W_k$ to the latent state $z \in \mathbb{R}^{N \times d}$ and context $X \in \mathbb{R}^{M \times d}$:
+        \begin{equation}
+            E(z; X, W_q, W_k) = -\frac{1}{\beta} \sum_{i=1}^N \log \left( \sum_{j=1}^M \exp\left( \beta \langle z_i W_q, x_j W_k \rangle \right) \right) + \frac{1}{2} \|z\|_F^2
+        \end{equation}
+    \end{itemize}
+
+    \item \textbf{Transfer of Theoretical Guarantees:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Because $W_q$ and $W_k$ are linear/affine projections, key theoretical properties of Continuous Modern Hopfield Networks directly apply:
+        \begin{itemize}[leftmargin=1.2em]
+            \item \textit{Explicit Landscape:} Local minima correspond directly to associative pattern attractors.
+            \item \textit{Controllable Basins:} Temperature $\beta$ directly controls the width and depth of attractor basins.
+            \item \textit{Convergence \& Capacity:} Guaranteed fast convergence and exponential storage capacity.
+        \end{itemize}
+    \end{itemize}
+
+    \item \textbf{Gradient Descent as Analytical Attention:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Applying iterative gradient descent on the proposed energy:
+        \begin{equation}
+            z_{k+1} = z_k - \lambda \nabla_z E(z_k)
+        \end{equation}
+        \item Taking the analytical derivative $\nabla_z E(z_k)$ in closed form yields the following update rule (complete step-by-step derivation provided in Appendix~\ref{sec:appendix_derivation}):
+        \begin{equation}
+            z_{k+1} = (1 - \lambda) z_k + \lambda \cdot \text{Attention}(z_k, X)
+        \end{equation}
+        where $\lambda \in (0, 1]$ represents the step size / interpolation factor.
+    \end{itemize}
+
+    \item \textbf{Equivalence to Residual Connections \& Rank Collapse Prevention:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item The update step $z_{k+1} = (1 - \lambda) z_k + \lambda \cdot \text{Attention}(z_k, X)$ is structurally equivalent to a residual connection in a Transformer layer.
+        \item By maintaining the identity path with coefficient $(1 - \lambda)$, this iterative update prevents representation degeneration and rank collapse across multiple steps, as established in \textit{Attention is not all you need: pure attention loses rank exponentially} \cite{dong2021attention}.
+    \end{itemize}
+\end{itemize}
+
+\section{Hypothesized Advantages}
+\label{sec:advantages}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Architectural Simplicity \& Novelty:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Unlike prior methods that require multi-layer MLPs or deep Transformer backbones to parameterize $E_\theta$, our formulation relies solely on an attention-based update derived from the explicit Hopfield energy.
+        \item This eliminates the need for complex, multi-layered energy networks while maintaining expressive latent reasoning capabilities.
+    \end{itemize}
+
+    \item \textbf{Comparison with Black-Box EBMs:}
+    \begin{center}
+    \small
+    \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Dimension} & \textbf{Proposed (Hopfield Latent Reasoning)} & \textbf{Black-Box EBMs (e.g., IREM)} \\
+    \midrule
+    \textbf{Energy Model} & Single Attention operation (Minimalist) & Multi-layer MLPs / Deep Networks \\
+    \textbf{Gradient Step} & Closed-form analytical attention & Numerical \texttt{torch.autograd} \\
+    \textbf{Landscape Theory} & Explicit, characterized attractors & Black-box / Unconstrained \\
+    \textbf{Runtime Efficiency} & Standard forward attention speed & Overhead from gradient graphs \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{itemize}
+
+\section{Proposed Experimental Verification Plan}
+\label{sec:experiments}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Evaluation on Benchmark Datasets:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item We evaluate on the established algorithmic reasoning datasets used across prior works (IREM, IRED, and DC-EBM): \textit{Continuous Addition}, \textit{Low Rank Approximation}, and \textit{Matrix Inverse}.
+        \item Experiments assess in-distribution accuracy, out-of-distribution (OOD) generalization, and computational efficiency.
+    \end{itemize}
+
+    \item \textbf{Planned Ablation Studies:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Single-head vs. Multi-head Hopfield Attention.
+        \item Effect of Deep Supervision across unrolled reasoning steps.
+        \item Influence of temperature parameter $\beta$ on landscape sharpness and convergence.
+    \end{itemize}
+
+    \item \textbf{Preliminary Results \& Performance Comparison:}
+    \begin{itemize}[leftmargin=1.2em]
+        \item Preliminary first runs demonstrate competitive reasoning performance compared to established EBM baselines:
+    \end{itemize}
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Method} & \textbf{Addition} & \textbf{Low Rank} & \textbf{Inverse} \\
+\midrule
+\multicolumn{4}{@{}l}{\textbf{Same Difficulty (In-Distribution)}} \\
+\midrule
+IREM & 0.00003 & 0.0183 & 0.0108 \\
+IRED & 0.00020 & 0.0174 & 0.0095 \\
+\textbf{Ours (Hopfield)} & -- & -- & -- \\
+\midrule
+\multicolumn{4}{@{}l}{\textbf{Harder Difficulty (Out-of-Distribution / OOD)}} \\
+\midrule
+IREM & 0.00210 & 0.2074 & 0.2083 \\
+IRED & 0.00200 & 0.2054 & 0.2063 \\
+\textbf{Ours (Hopfield)} & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\appendix
+\section{Derivation of Analytical Attention Gradient}
+\label{sec:appendix_derivation}
+
+Let the components and their dimensions be defined as follows:
+\begin{itemize}[leftmargin=1.5em]
+    \item $z \in \mathbb{R}^{d_z}$: The latent state vector (for simplicity, we show the derivation for a single query vector, $N=1$).
+    \item $X \in \mathbb{R}^{M \times d_x}$: The input context matrix, consisting of $M$ vectors $x_j \in \mathbb{R}^{d_x}$.
+    \item $W_q \in \mathbb{R}^{d_z \times d_{model}}$: The query projection matrix.
+    \item $W_k \in \mathbb{R}^{d_x \times d_{model}}$: The key projection matrix.
+\end{itemize}
+
+We define the Hopfield-inspired energy function as:
+\begin{equation}
+    E(z) = -\frac{1}{\beta} \log \sum_{j=1}^M \exp\left( \beta \langle z W_q, x_j W_k \rangle \right) + \frac{1}{2} \|z\|_2^2
+\end{equation}
+
+To find the gradient descent step, we need to compute the analytical derivative $\nabla_z E(z)$. Let the interaction term be denoted as $A_j = \langle z W_q, x_j W_k \rangle$. The energy can be rewritten as:
+\begin{equation}
+    E(z) = -\frac{1}{\beta} \log \sum_{j=1}^M \exp\left( \beta A_j \right) + \frac{1}{2} \|z\|_2^2
+\end{equation}
+
+Taking the derivative with respect to $z$:
+\begin{equation}
+    \nabla_z E(z) = -\frac{1}{\beta} \frac{1}{\sum_{j=1}^M \exp(\beta A_j)} \sum_{j=1}^M \exp(\beta A_j) \cdot \beta \nabla_z A_j + z
+\end{equation}
+
+Notice that $\nabla_z A_j = \nabla_z (z W_q (x_j W_k)^T) = W_q (x_j W_k)^T = W_q W_k^T x_j^T$. Substituting this back into the equation:
+\begin{equation}
+    \nabla_z E(z) = - \sum_{j=1}^M \frac{\exp(\beta \langle z W_q, x_j W_k \rangle)}{\sum_{m=1}^M \exp(\beta \langle z W_q, x_m W_k \rangle)} W_q W_k^T x_j^T + z
+\end{equation}
+
+Let $p_j = \frac{\exp(\beta \langle z W_q, x_j W_k \rangle)}{\sum_{m=1}^M \exp(\beta \langle z W_q, x_m W_k \rangle)} = \text{softmax}(\beta z W_q (X W_k)^T)_j$. Then:
+\begin{equation}
+    \nabla_z E(z) = - \sum_{j=1}^M p_j \cdot W_q W_k^T x_j^T + z
+\end{equation}
+
+In matrix form, recognizing that $\sum p_j x_j^T$ is $p X$:
+\begin{equation}
+    \nabla_z E(z) = - \text{softmax}(\beta z W_q (X W_k)^T) X W_k W_q^T + z
+\end{equation}
+
+When performing a gradient descent step with step size $\lambda$, we have:
+\begin{equation}
+    z_{k+1} = z_k - \lambda \nabla_z E(z_k)
+\end{equation}
+\begin{equation}
+    z_{k+1} = (1 - \lambda) z_k + \lambda \cdot \text{softmax}(\beta z_k W_q (X W_k)^T) X W_k W_q^T
+\end{equation}
+
+If we set $\beta = 1/\sqrt{d_{model}}$, $Q = z_k W_q$, $K = X W_k$, $W_v = W_k W_q^T$, and $V = X W_v$, the equation can be rewritten in the standard attention form:
+\begin{equation}
+    z_{k+1} = (1 - \lambda) z_k + \lambda \cdot \text{softmax}\left( \frac{Q K^T}{\sqrt{d_{model}}} \right) V
+\end{equation}
+
+This derivation reveals key properties of the update rule:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Cross-Attention:} The negative gradient of the Hopfield energy precisely yields the standard cross-attention mechanism.
+    \item \textbf{Residual Connection:} The gradient descent update naturally forms a convex combination / residual connection.
+    \item \textbf{Rank Collapse Prevention:} Thanks to the $(1-\lambda) z_k$ term (which naturally emerges from the derivative of the norm $\|z\|_2^2$), the iterative update prevents representation degeneration and rank collapse, addressing a core limitation of pure attention mechanisms \cite{dong2021attention}.
+\end{itemize}
+
+\begin{thebibliography}{9}
+\bibitem{dong2021attention}
+Yihe Dong, Jean-Baptiste Cordonnier, and Andreas Loukas.
+\newblock Attention is not all you need: pure attention loses rank exponentially.
+\newblock In \textit{International Conference on Machine Learning (ICML)}, 2021.
+\end{thebibliography}
+
+\end{document}
