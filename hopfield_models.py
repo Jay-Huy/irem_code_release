@@ -164,7 +164,9 @@ class HopfieldEnergySolver(nn.Module):
 
         Q = self.W_q(self.norm_z(z))          # (batch, out_dim, d_k=512) - Pre-LN cho Query
         K = self.W_k(self.norm_x(x_tokens))   # (batch, inp_dim, d_k=512) - Pre-LN cho Key
+
         V = self.W_v(x_tokens)                # (batch, inp_dim, d_model=512) - Không Norm cho Value
+        # V = self.W_v(self.norm_x(x_tokens))   # (batch, inp_dim, d_model=512)
 
         batch = Q.size(0)
         d_k_head = self.d_k // self.num_heads
@@ -198,7 +200,7 @@ class HopfieldEnergySolver(nn.Module):
         z_next = (1.0 - lam) * z + lam * attn_out                 # (batch, out_dim, d_model=512)
         return z_next
 
-    def get_energy(self, z, x_tokens):
+    def get_energy(self, z, x_tokens): 
         """
         Tính hàm năng lượng Continuous Hopfield Energy chuẩn xác cho Multi-head:
         Tổng năng lượng của các head độc lập.
