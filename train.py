@@ -515,9 +515,9 @@ def test(test_loader_id, test_loader_ood, model, FLAGS, step=0, is_best=False):
         r = res[tag]
         row = f"  {tag:<10s}"
         for m in cols:
-            row += f"{r['dist'][m].item():>11.3e}" if m < r['dist'].numel() else f"{'-':>11s}"
-        row += f"{r['oracle_err']:>11.3e}({r['oracle_step']:>4.1f})"
-        row += f"{r['energy_err']:>11.3e}({r['energy_step']:>4.1f})"
+            row += f"{r['dist'][m].item():>11.6f}" if m < r['dist'].numel() else f"{'-':>11s}"
+        row += f"{r['oracle_err']:>11.6f}({r['oracle_step']:>4.1f})"
+        row += f"{r['energy_err']:>11.6f}({r['energy_step']:>4.1f})"
         print(row)
 
     if FLAGS.hopfield:
@@ -525,12 +525,12 @@ def test(test_loader_id, test_loader_ood, model, FLAGS, step=0, is_best=False):
         for tag in ['ID', 'OOD']:
             if tag in res and res[tag]['mono_tot'] > 0:
                 r = res[tag]
-                mono += f"    {tag} {r['mono_ok']}/{r['mono_tot']}"
+                mono += f"    {tag} {100.0 * r['mono_ok'] / r['mono_tot']:5.1f}%"
         print()
         print(mono)
 
     tail = "  ← MOI TOT NHAT, da luu model_best.pth" if is_best else ""
-    print(f"  best(ID oracle): {best_oracle_error:.3e}{tail}")
+    print(f"  best(ID oracle): {best_oracle_error:.6f}{tail}")
     print()
 
     # ------------------------------------------------------------------ wandb
@@ -735,7 +735,7 @@ def train(train_dataloader, test_loader_id, test_loader_ood, logger, model,
                 if cur < prev_best - 1e-12:
                     ckpt['best_oracle_error'] = cur
                     torch.save(ckpt, osp.join(logdir, "model_best.pth"))
-                    print(f"  → model_best.pth updated: oracle {prev_best:.3e} → {cur:.3e}")
+                    print(f"  → model_best.pth updated: oracle {prev_best:.6f} → {cur:.6f}")
 
             if it >= getattr(FLAGS, 'num_iterations', 10000):
                 print(f"\n[INFO] Đã hoàn thành huấn luyện: {it}/{FLAGS.num_iterations} iterations.")
