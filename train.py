@@ -173,8 +173,6 @@ parser.add_argument('--test_steps', default=20, type=int,
                     help='Steps of iterative inference for testing')
 parser.add_argument('--step_lr', default=100.0, type=float,
                     help='step size of latents')
-parser.add_argument('--ood', action='store_true',
-                    help='test on the harder ood dataset')
 parser.add_argument('--recurrent', action='store_true',
                     help='utilize a recurrent model to output prediction')
 parser.add_argument('--ponder', action='store_true',
@@ -189,6 +187,16 @@ parser.add_argument('--beta', default=None, type=float,
                     help='inverse temperature beta for Hopfield attention (default: None -> 1/sqrt(d_k))')
 parser.add_argument('--num_heads', default=8, type=int,
                     help='Number of heads for Hopfield Multi-head Attention (default: 8. Set to 1 for Single-head)')
+parser.add_argument('--tie_mode', default='hard', type=str,
+                    choices=['hard', 'random', 'orbit'],
+                    help='how W_v W_o is tied to W_k W_q^T. '
+                         'hard: no W_v/W_o at all (update is exactly -grad E). '
+                         'random: free W_v/W_o, random init, tie enforced only by tie_penalty. '
+                         'orbit: free W_v/W_o initialised on the tie manifold (random orthogonal gauge G_h).')
+parser.add_argument('--tie_gamma', default=0.01, type=float,
+                    help='weight of tie_penalty() in the loss. Default 0.01 chosen so that '
+                         '||grad R|| ~ 10%% of ||grad MSE|| at init (see check_descent.py PHAN 3). '
+                         'Ignored when tie_mode=hard (penalty is identically 0).')
 parser.add_argument('--deep_sup', action='store_true',
                     help='Enable Deep Supervision (calculate loss across all iterative steps)')
 parser.add_argument('--truncate_hopfield', action='store_true',
@@ -370,9 +378,11 @@ def init_model(FLAGS, device, dataset):
         step_lr = FLAGS.step_lr if FLAGS.step_lr <= 1.0 else 0.5
         beta = getattr(FLAGS, 'beta', None)
         num_heads = getattr(FLAGS, 'num_heads', 8)
+        tie_mode = getattr(FLAGS, 'tie_mode', 'hard')
         model = HopfieldEnergySolver(
-            dataset.inp_dim, dataset.out_dim, 
-            num_heads=num_heads, step_lr=step_lr, beta=beta
+            dataset.inp_dim, dataset.out_dim,
+            num_heads=num_heads, step_lr=step_lr, beta=beta,
+            tie_mode=tie_mode
         )
     else:
         model = EBM(dataset.inp_dim, dataset.out_dim, FLAGS.mem)
@@ -397,29 +407,26 @@ def calc_geometric(l, dim=-1):
     return exclusive_cumprod(1 - l, dim=dim) * l
 
 
-def test(test_dataloader, model, FLAGS, step=0):
-    global best_energy_error, best_oracle_error
+def _eval_loader(loader, model, FLAGS, dev, test_steps, tag, step):
+    """Chay test_steps buoc suy dien tren <=11 batch dau cua `loader`.
+
+    Tra ve dict:
+        dist    : (test_steps+1,)  MSE trung binh tai tung buoc (index 0 = y_0 ngau nhien)
+        energy  : (test_steps,)    gia tri E trung binh tai tung buoc
+        oracle_err / oracle_step  : min MSE thuc su (dung ground-truth de chon buoc)
+        energy_err / energy_step  : MSE tai buoc co E nho nhat (cach chon cua EBM)
+        mono_ok / mono_tot        : so cap buoc lien tiep co E giam / tong so cap
+    """
     from tqdm import tqdm
 
-    if FLAGS.cuda:
-        dev = torch.device("cuda")
-    else:
-        dev = torch.device("cpu")
-
-    model.eval()
+    dist_list, energy_list = [], []
+    min_energy_dist_list, min_energy_step_list = [], []
+    oracle_dist_list, oracle_step_list = [], []
+    mono_ok, mono_tot = 0, 0
     counter = 0
 
-    dist_list = []
-    energy_list = []
-    min_energy_dist_list = []
-    min_energy_step_list = []
-    oracle_dist_list = []
-    oracle_step_list = []
-
-    test_steps = getattr(FLAGS, 'test_steps', 20)
-
     with torch.no_grad():
-        for inp, im in tqdm(test_dataloader, desc=f"Testing (Step {step})"):
+        for inp, im in tqdm(loader, desc=f"test[{tag}] @ it{step}", leave=False):
             im = im.float().to(dev)
             inp = inp.float().to(dev)
 
@@ -429,91 +436,131 @@ def test(test_dataloader, model, FLAGS, step=0):
 
             pred, preds, im_grad, energies, scratch, logits = gen_answer(
                 inp, FLAGS, model, pred, scratch, test_steps)
-            
-            preds = torch.stack(preds, dim=0)       # (test_steps + 1, batch, out_dim)
-            energies = torch.stack(energies, dim=0) # (test_steps, batch, 1)
 
-            if FLAGS.ponder:
-                halting_probs = calc_geometric(logits.sigmoid(), dim=1)[..., 0]
-                cum_halting_probs = torch.cumsum(halting_probs, dim=-1)
-                rand_val = torch.rand(halting_probs.size(0)).to(cum_halting_probs.device)
-                sort_id = torch.searchsorted(cum_halting_probs, rand_val[:, None])
-                sort_id = torch.clamp(sort_id, 0, sort_id.size(1) - 1)
-                sort_id = sort_id[:, :, None].expand(-1, -1, pred.size(-1))
+            preds = torch.stack(preds, dim=0)        # (test_steps + 1, batch, out_dim)
+            energies = torch.stack(energies, dim=0)  # (test_steps, batch, 1)
 
             dist = (preds - im[None, :])
-            dist = torch.pow(dist, 2).mean(dim=-1)  # (test_steps + 1, batch)
+            dist = torch.pow(dist, 2).mean(dim=-1)   # (test_steps + 1, batch)
+            dist_energies = dist[1:, :]              # (test_steps, batch)
 
-            dist_energies = dist[1:, :]             # (test_steps, batch)
-            
             # --- Energy Best (EBM selection) ---
-            min_idx = energies[:, :, 0].argmin(dim=0)[None, :]          # (1, batch)
-            dist_min_energy = torch.gather(dist_energies, 0, min_idx)   # (1, batch)
+            min_idx = energies[:, :, 0].argmin(dim=0)[None, :]
+            dist_min_energy = torch.gather(dist_energies, 0, min_idx)
             min_energy_dist_list.append(dist_min_energy.detach().squeeze(0))
             min_energy_step_list.append(min_idx.detach().squeeze(0))
 
             # --- Oracle Best (Absolute Minimum MSE) ---
-            oracle_min_dist, oracle_min_idx = dist_energies.min(dim=0)  # (batch), (batch)
+            oracle_min_dist, oracle_min_idx = dist_energies.min(dim=0)
             oracle_dist_list.append(oracle_min_dist.detach())
             oracle_step_list.append(oracle_min_idx.detach())
 
-            energies = energies.mean(dim=-1).mean(dim=-1) # (test_steps,)
-            dist_list.append(dist.mean(dim=-1).detach())  # (test_steps + 1,)
-            energy_list.append(energies.detach())         # (test_steps,)
+            # --- E don dieu: dem so cap buoc lien tiep ma E KHONG tang ---
+            e = energies[:, :, 0]                    # (test_steps, batch)
+            if e.size(0) > 1:
+                inc = (e[1:] > e[:-1] + 1e-9)
+                mono_ok += int((~inc).sum().item())
+                mono_tot += int(inc.numel())
+
+            dist_list.append(dist.mean(dim=-1).detach())
+            energy_list.append(energies.mean(dim=-1).mean(dim=-1).detach())
 
             counter += 1
-            if counter > 10:  # Evaluate on a subset of 10 batches to speed up testing
+            if counter > 10:   # Evaluate on a subset of batches to speed up testing
                 break
 
-    # Aggregate over evaluated batches
-    dist_list = torch.stack(dist_list, dim=0).mean(dim=0)          # (test_steps + 1,)
-    energy_list = torch.stack(energy_list, dim=0).mean(dim=0)      # (test_steps,)
-    
-    mean_energy_best_dist = torch.cat(min_energy_dist_list).mean()
-    mean_energy_best_step = torch.cat(min_energy_step_list).float().mean() + 1 # +1 to display 1-indexed step
-    
-    mean_oracle_dist = torch.cat(oracle_dist_list).mean()
-    mean_oracle_step = torch.cat(oracle_step_list).float().mean() + 1          # +1 to display 1-indexed step
+    return {
+        'dist': torch.stack(dist_list, dim=0).mean(dim=0),
+        'energy': torch.stack(energy_list, dim=0).mean(dim=0),
+        'oracle_err': torch.cat(oracle_dist_list).mean().item(),
+        'oracle_step': torch.cat(oracle_step_list).float().mean().item() + 1,
+        'energy_err': torch.cat(min_energy_dist_list).mean().item(),
+        'energy_step': torch.cat(min_energy_step_list).float().mean().item() + 1,
+        'mono_ok': mono_ok,
+        'mono_tot': mono_tot,
+    }
 
-    # Update Global Bests
-    if 'best_energy_error' not in globals():
-        best_energy_error = float('inf')
-        best_oracle_error = float('inf')
-        
-    best_energy_error = min(best_energy_error, mean_energy_best_dist.item())
-    best_oracle_error = min(best_oracle_error, mean_oracle_dist.item())
 
-    print("\nTesting..................")
-    print(f"step errors (up to 20): ", dist_list[:20])
-    print(f"energy values (up to 20): ", energy_list[:20])
-    print(f"Oracle best error: {mean_oracle_dist.item():.5f} (Avg at step {mean_oracle_step.item():.1f})")
-    print(f"Energy best error: {mean_energy_best_dist.item():.5f} (Avg at step {mean_energy_best_step.item():.1f})")
-    print(f'test at step {step} done!')
+def test(test_loader_id, test_loader_ood, model, FLAGS, step=0, is_best=False):
+    """Danh gia CA HAI phan phoi (in-distribution va OOD) va in mot bang gon.
 
+    Tra ve oracle_best_error cua IN-DISTRIBUTION -> day la tieu chi chon model_best.
+    """
+    global best_energy_error, best_oracle_error
+
+    dev = torch.device("cuda") if FLAGS.cuda else torch.device("cpu")
+    model.eval()
+
+    test_steps = getattr(FLAGS, 'test_steps', 20)
+
+    res = {'ID': _eval_loader(test_loader_id, model, FLAGS, dev, test_steps, 'ID', step)}
+    if test_loader_ood is not None:
+        res['OOD'] = _eval_loader(test_loader_ood, model, FLAGS, dev, test_steps, 'OOD', step)
+
+    best_energy_error = min(best_energy_error, res['ID']['energy_err'])
+    best_oracle_error = min(best_oracle_error, res['ID']['oracle_err'])
+
+    # ------------------------------------------------------------------ in bang
+    cols = sorted(set(m for m in [test_steps // 4, test_steps // 2,
+                                  3 * test_steps // 4, test_steps] if m >= 1))
+    print()
+    rule = f"── test @ iter {step} "
+    print(rule + "─" * max(4, 12 + 11 * len(cols) + 34 - len(rule)))
+    hdr = " " * 12 + "".join(f"{'step'+str(m):>11s}" for m in cols)
+    hdr += f"{'oracle(step)':>17s}{'energy(step)':>17s}"
+    print(hdr)
+    for tag in ['ID', 'OOD']:
+        if tag not in res:
+            continue
+        r = res[tag]
+        row = f"  {tag:<10s}"
+        for m in cols:
+            row += f"{r['dist'][m].item():>11.3e}" if m < r['dist'].numel() else f"{'-':>11s}"
+        row += f"{r['oracle_err']:>11.3e}({r['oracle_step']:>4.1f})"
+        row += f"{r['energy_err']:>11.3e}({r['energy_step']:>4.1f})"
+        print(row)
+
+    if FLAGS.hopfield:
+        mono = "  E don dieu:"
+        for tag in ['ID', 'OOD']:
+            if tag in res and res[tag]['mono_tot'] > 0:
+                r = res[tag]
+                mono += f"    {tag} {r['mono_ok']}/{r['mono_tot']}"
+        print()
+        print(mono)
+
+    tail = "  ← MOI TOT NHAT, da luu model_best.pth" if is_best else ""
+    print(f"  best(ID oracle): {best_oracle_error:.3e}{tail}")
+    print()
+
+    # ------------------------------------------------------------------ wandb
     if getattr(FLAGS, 'use_wandb', False) and HAS_WANDB:
         try:
             log_dict = {
-                "test/oracle_best_error": mean_oracle_dist.item(),
-                "test/oracle_best_step": mean_oracle_step.item(),
-                "test/energy_best_error": mean_energy_best_dist.item(),
-                "test/energy_best_step": mean_energy_best_step.item(),
                 "test/global_best_oracle": best_oracle_error,
                 "test/global_best_energy": best_energy_error,
             }
-            # Dynamically log error at 4 equally spaced intervals
-            intervals = [test_steps // 4, test_steps // 2, 3 * test_steps // 4, test_steps]
-            for m in intervals:
-                if m <= len(dist_list) - 1:
-                    log_dict[f"test/error_step_{m}"] = dist_list[m].item()
-                    
+            for tag in res:
+                p = 'test' if tag == 'ID' else 'test_ood'
+                r = res[tag]
+                log_dict[f"{p}/oracle_best_error"] = r['oracle_err']
+                log_dict[f"{p}/oracle_best_step"] = r['oracle_step']
+                log_dict[f"{p}/energy_best_error"] = r['energy_err']
+                log_dict[f"{p}/energy_best_step"] = r['energy_step']
+                if r['mono_tot'] > 0:
+                    log_dict[f"{p}/E_mono_frac"] = r['mono_ok'] / r['mono_tot']
+                for m in cols:
+                    if m < r['dist'].numel():
+                        log_dict[f"{p}/error_step_{m}"] = r['dist'][m].item()
             wandb.log(log_dict, step=step)
         except Exception:
             pass
 
     model.train()
+    return res['ID']['oracle_err']
 
 
-def train(train_dataloader, test_dataloader, logger, model,
+def train(train_dataloader, test_loader_id, test_loader_ood, logger, model,
           optimizer, FLAGS, logdir, rank_idx):
 
     it = FLAGS.resume_iter
@@ -572,7 +619,9 @@ def train(train_dataloader, test_dataloader, logger, model,
                     preds[:, :] - im[:, None, :], 2)).mean(dim=-1).mean(dim=-1)
             elif FLAGS.hopfield:
                 if getattr(FLAGS, 'deep_sup', False):
-                    im_loss = torch.pow(preds[:, :] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
+                    # preds[:, 0] la y_0 ngau nhien (chua qua buoc nao), khong phai
+                    # output cua model -> KHONG dua vao loss.
+                    im_loss = torch.pow(preds[:, 1:] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
                 else:
                     im_loss = torch.pow(preds[:, -1:] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
             else:
@@ -580,6 +629,21 @@ def train(train_dataloader, test_dataloader, logger, model,
                     preds[:, -1:] - im[:, None, :], 2).mean(dim=-1).mean(dim=-1)
 
             loss = im_loss.mean()
+
+            # im_loss_last: MSE cua RIENG buoc cuoi. Luon tinh, ke ca khi deep_sup bat,
+            # de con so nay so sanh duoc giua cac run co/khong deep_sup.
+            with torch.no_grad():
+                im_loss_last = torch.pow(
+                    preds[:, -1] - im, 2).mean().item()
+
+            tie_R = 0.0
+            if FLAGS.hopfield:
+                # tie_mode='hard' -> tie_penalty() tra ve 0 (khong co W_v/W_o),
+                # nen khong can re nhanh o day.
+                R = model.tie_penalty()
+                tie_R = R.item()
+                if FLAGS.tie_gamma != 0.0:
+                    loss = loss + FLAGS.tie_gamma * R
 
             if FLAGS.ponder:
                 ponder_loss = 0.01 * \
@@ -608,6 +672,10 @@ def train(train_dataloader, test_dataloader, logger, model,
                 loss = loss.item()
                 kvs = {}
                 kvs['im_loss'] = im_loss.mean().item()
+                kvs['im_loss_last'] = im_loss_last
+
+                if FLAGS.hopfield:
+                    kvs['tie_R'] = tie_R
 
                 if it > 10:
                     replay_mask = replay_mask
@@ -651,15 +719,23 @@ def train(train_dataloader, test_dataloader, logger, model,
                 print(string)
 
             if it % FLAGS.save_interval == 0 and rank_idx == 0:
-                model_path = osp.join(logdir, "model_latest.pth".format(it))
-                ckpt = {'FLAGS': FLAGS}
-
+                ckpt = {'FLAGS': FLAGS, 'iter': it}
                 ckpt['model_state_dict'] = model.state_dict()
                 ckpt['optimizer_state_dict'] = optimizer.state_dict()
 
-                torch.save(ckpt, model_path)
+                # model_latest: LUON ghi -> dung de resume.
+                torch.save(ckpt, osp.join(logdir, "model_latest.pth"))
 
-                test(test_dataloader, model, FLAGS, step=it)
+                # Danh gia CHINH weight vua ghi (khong load lai file nao).
+                prev_best = best_oracle_error
+                cur = test(test_loader_id, test_loader_ood, model, FLAGS,
+                           step=it, is_best=False)
+
+                # model_best: chi ghi khi oracle_best_error tren ID tot hon truoc do.
+                if cur < prev_best - 1e-12:
+                    ckpt['best_oracle_error'] = cur
+                    torch.save(ckpt, osp.join(logdir, "model_best.pth"))
+                    print(f"  → model_best.pth updated: oracle {prev_best:.3e} → {cur:.3e}")
 
             if it >= getattr(FLAGS, 'num_iterations', 10000):
                 print(f"\n[INFO] Đã hoàn thành huấn luyện: {it}/{FLAGS.num_iterations} iterations.")
@@ -669,6 +745,7 @@ def train(train_dataloader, test_dataloader, logger, model,
 
 
 def main_single(rank, FLAGS):
+    global best_oracle_error, best_energy_error
     rank_idx = rank
     world_size = FLAGS.gpus
     logdir = osp.join(FLAGS.logdir, FLAGS.exp)
@@ -686,9 +763,13 @@ def main_single(rank, FLAGS):
             pass
 
     # Load Dataset
+    # test_dataset      = IN-DISTRIBUTION  (cung phan phoi voi train)
+    # test_dataset_ood  = OOD              (None neu task khong co bien the OOD)
+    test_dataset_ood = None
     if FLAGS.dataset == 'lowrank':
-        dataset = LowRankDataset('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = LowRankDataset('test', FLAGS.rank, FLAGS.ood)
+        dataset = LowRankDataset('train', FLAGS.rank, False)
+        test_dataset = LowRankDataset('test', FLAGS.rank, False)
+        test_dataset_ood = LowRankDataset('test', FLAGS.rank, True)
     elif FLAGS.dataset == 'shortestpath':
         dataset = ShortestPath('train', FLAGS.rank, FLAGS.num_steps)
         test_dataset = ShortestPath('test', FLAGS.rank, FLAGS.num_steps)
@@ -696,11 +777,13 @@ def main_single(rank, FLAGS):
         dataset = Negate('train', FLAGS.rank)
         test_dataset = Negate('test', FLAGS.rank)
     elif FLAGS.dataset == 'addition':
-        dataset = Addition('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = Addition('test', FLAGS.rank, FLAGS.ood)
+        dataset = Addition('train', FLAGS.rank, False)
+        test_dataset = Addition('test', FLAGS.rank, False)
+        test_dataset_ood = Addition('test', FLAGS.rank, True)
     elif FLAGS.dataset == 'inverse':
-        dataset = Inverse('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = Inverse('test', FLAGS.rank, FLAGS.ood)
+        dataset = Inverse('train', FLAGS.rank, False)
+        test_dataset = Inverse('test', FLAGS.rank, False)
+        test_dataset_ood = Inverse('test', FLAGS.rank, True)
     elif FLAGS.dataset == 'square':
         dataset = Square('train', FLAGS.rank, FLAGS.num_steps)
         test_dataset = Square('test', FLAGS.rank, FLAGS.num_steps)
@@ -755,12 +838,28 @@ def main_single(rank, FLAGS):
 
     # Load model and key arguments
     if FLAGS.resume_iter != 0:
-        model_path = osp.join(
-            logdir, "model_latest.pth".format(
-                FLAGS.resume_iter))
+        # resume (tiep tuc train)  -> model_latest.pth  (trang thai moi nhat)
+        # eval-only (--train tat)  -> model_best.pth neu co (performance tot nhat)
+        ckpt_name = "model_latest.pth"
+        if not FLAGS_OLD.train and osp.exists(osp.join(logdir, "model_best.pth")):
+            ckpt_name = "model_best.pth"
+        model_path = osp.join(logdir, ckpt_name)
+        print(f"[INFO] load checkpoint: {model_path}")
 
         with torch.serialization.safe_globals([argparse.Namespace]):
             checkpoint = torch.load(model_path, weights_only=True)
+
+        # Khoi phuc moc best de model_best.pth khong bi ghi de boi ket qua te hon.
+        best_path = osp.join(logdir, "model_best.pth")
+        if osp.exists(best_path):
+            try:
+                with torch.serialization.safe_globals([argparse.Namespace]):
+                    _b = torch.load(best_path, weights_only=True)
+                if _b.get('best_oracle_error') is not None:
+                    best_oracle_error = _b['best_oracle_error']
+                    print(f"[INFO] best_oracle_error truoc do = {best_oracle_error:.3e}")
+            except Exception:
+                pass
 
         FLAGS = checkpoint['FLAGS']
 
@@ -777,6 +876,14 @@ def main_single(rank, FLAGS):
         FLAGS.beta = getattr(FLAGS_OLD, 'beta', None)
         FLAGS.truncate_hopfield = getattr(FLAGS_OLD, 'truncate_hopfield', False)
         FLAGS.heatmap = getattr(FLAGS_OLD, 'heatmap', False)
+        FLAGS.num_heads = getattr(FLAGS_OLD, 'num_heads', 8)
+        FLAGS.tie_mode = getattr(FLAGS_OLD, 'tie_mode', 'hard')
+        FLAGS.tie_gamma = getattr(FLAGS_OLD, 'tie_gamma', 0.01)
+        FLAGS.deep_sup = getattr(FLAGS_OLD, 'deep_sup', False)
+        FLAGS.test_steps = getattr(FLAGS_OLD, 'test_steps', 20)
+        FLAGS.num_iterations = getattr(FLAGS_OLD, 'num_iterations', 10000)
+        FLAGS.log_interval = getattr(FLAGS_OLD, 'log_interval', 10)
+        FLAGS.cuda = getattr(FLAGS_OLD, 'cuda', False)
 
         model, optimizer = init_model(FLAGS, device, dataset)
         state_dict = model.state_dict()
@@ -798,14 +905,20 @@ def main_single(rank, FLAGS):
         shuffle=shuffle,
         pin_memory=False,
         worker_init_fn=worker_init_fn)
-    test_dataloader = DataLoader(
-        test_dataset,
-        num_workers=FLAGS.data_workers,
-        batch_size=FLAGS.batch_size,
-        shuffle=True,
-        pin_memory=False,
-        drop_last=True,
-        worker_init_fn=worker_init_fn)
+    def _make_test_loader(ds):
+        if ds is None:
+            return None
+        return DataLoader(
+            ds,
+            num_workers=FLAGS.data_workers,
+            batch_size=FLAGS.batch_size,
+            shuffle=True,
+            pin_memory=False,
+            drop_last=True,
+            worker_init_fn=worker_init_fn)
+
+    test_loader_id = _make_test_loader(test_dataset)
+    test_loader_ood = _make_test_loader(test_dataset_ood)
 
     logger = SummaryWriter(logdir)
     it = FLAGS.resume_iter
@@ -835,7 +948,8 @@ def main_single(rank, FLAGS):
     if FLAGS.train:
         train(
             train_dataloader,
-            test_dataloader,
+            test_loader_id,
+            test_loader_ood,
             logger,
             model,
             optimizer,
@@ -843,7 +957,8 @@ def main_single(rank, FLAGS):
             logdir,
             rank_idx)
     else:
-        test(test_dataloader, model, FLAGS, step=FLAGS.resume_iter)
+        test(test_loader_id, test_loader_ood, model, FLAGS,
+             step=FLAGS.resume_iter)
 
     if getattr(FLAGS, 'use_wandb', False) and rank_idx == 0 and HAS_WANDB:
         try:
